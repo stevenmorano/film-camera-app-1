@@ -1,7 +1,22 @@
--- OPT-IN ONLY: apply as an administrator to a dedicated DEVELOPMENT project.
+-- OPT-IN ONLY: apply as an administrator to an explicitly marked DEVELOPMENT project.
 -- This file is intentionally outside migrations and is never run by db push/reset.
 begin;
-update private.project_settings set is_development = true where singleton;
+
+do $guard$
+declare v_environment text;
+begin
+  select s.project_environment into v_environment
+  from private.project_settings s where s.singleton;
+  if v_environment is distinct from 'development' then
+    raise exception using errcode = '42501',
+      message = 'Shortened development periods require an explicitly marked development project.';
+  end if;
+end;
+$guard$;
+
+update private.project_settings
+set is_development = true
+where singleton and project_environment = 'development';
 
 create or replace function private.create_development_roll(
   p_name text, p_development_seconds integer, p_total_exposures integer, p_roll_type text
@@ -9,7 +24,10 @@ create or replace function private.create_development_roll(
 declare v_roll public.rolls;
 begin
   if auth.uid() is null then raise exception using errcode = '28000', message = 'Authentication required.'; end if;
-  if not coalesce((select s.is_development from private.project_settings s where s.singleton), false) then
+  if not coalesce((
+    select s.is_development and s.project_environment = 'development'
+    from private.project_settings s where s.singleton
+  ), false) then
     raise exception using errcode = '42501', message = 'Development tools are disabled.';
   end if;
   if p_development_seconds is null or p_development_seconds not in (30, 300, 3600, 604800) then

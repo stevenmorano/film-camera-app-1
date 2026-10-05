@@ -4,7 +4,9 @@ begin;
 
 -- Exercise production duration authorization even if this disposable local
 -- project was explicitly configured for developer fixtures. ROLLBACK restores it.
-update private.project_settings set is_development = false where singleton;
+update private.project_settings
+set is_development = false, project_environment = 'production'
+where singleton;
 
 create temporary table test_results (
   number integer generated always as identity,
@@ -65,6 +67,11 @@ begin
   );
 end;
 $function$;
+
+select pg_temp.record_result(
+  (select project_environment = 'production' and not is_development
+   from private.project_settings where singleton),
+  'database suite marks its fixture as production before testing duration guards');
 
 do $grant$
 declare v_namespace text;
@@ -446,6 +453,9 @@ select pg_temp.record_result(
 select pg_temp.expect_error(
   $$update private.project_settings set is_development = true where singleton$$,
   'mobile client cannot enable the development-only duration mechanism', '42501');
+select pg_temp.expect_error(
+  $$update private.project_settings set project_environment = 'development' where singleton$$,
+  'mobile client cannot mark a project as development', '42501');
 reset role;
 update public.rolls
 set status = 'developed', finished_at = now() - interval '8 days',

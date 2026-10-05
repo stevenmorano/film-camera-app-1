@@ -179,20 +179,36 @@ async function insertDevelopmentFixture(userId) {
   );
 }
 
-async function assertDevelopmentRPCIsAbsent() {
-  const { rows } = await client.query(
-    `SELECT to_regprocedure('public.create_development_roll(text,integer,integer,text)') IS NULL AS public_absent,
-       to_regprocedure('private.create_development_roll(text,integer,integer,text)') IS NULL AS private_absent,
-       (SELECT NOT is_development FROM private.project_settings WHERE singleton) AS disabled`,
-  );
+async function assertDevelopmentRPCIsAbsent(expectedEnvironment) {
+  const query =
+    "SELECT to_regprocedure('public.create_development_roll(text,integer,integer,text)') IS NULL AS public_absent, " +
+    "to_regprocedure('private.create_development_roll(text,integer,integer,text)') IS NULL AS private_absent, " +
+    "(SELECT NOT is_development FROM private.project_settings WHERE singleton) AS disabled, " +
+    "(SELECT project_environment FROM private.project_settings WHERE singleton) AS project_environment";
+  const { rows } = await client.query(query);
   assert.equal(rows[0].public_absent, true);
   assert.equal(rows[0].private_absent, true);
   assert.equal(rows[0].disabled, true);
+  if (expectedEnvironment !== undefined) {
+    assert.equal(rows[0].project_environment, expectedEnvironment);
+  }
+}
+
+async function assertDevelopmentEnableFails(sql, expectedState, label) {
+  let failure;
+  try {
+    await client.query(sql);
+  } catch (error) {
+    failure = error;
+  }
+  if (failure) await client.query("ROLLBACK");
+  assert.ok(failure, label + ": expected SQLSTATE " + expectedState + ", but the script succeeded");
+  assert.equal(failure.code, expectedState, label + ": " + failure.message);
 }
 
 async function runDevelopmentGuards() {
   const userId = randomUUID();
-  await assertDevelopmentRPCIsAbsent();
+  await assertDevelopmentRPCIsAbsent("unknown");
   await client.query("BEGIN");
   try {
     await insertDevelopmentFixture(userId);
@@ -202,15 +218,67 @@ async function runDevelopmentGuards() {
       [],
       "42501",
     );
+    await expectSQLState(
+      "UPDATE private.project_settings SET project_environment = 'development' WHERE singleton",
+      [],
+      "42501",
+    );
   } finally {
     await client.query("ROLLBACK");
   }
-  console.log("PASS: production omits development RPCs; authenticated users cannot enable test durations");
+  console.log("PASS: unknown projects default closed; authenticated users cannot enable or classify development");
+  await client.query("BEGIN");
+  try {
+    await expectSQLState(
+      "UPDATE private.project_settings SET project_environment = 'staging' WHERE singleton",
+      [],
+      "23514",
+    );
+  } finally {
+    await client.query("ROLLBACK");
+  }
+  console.log("PASS: unrecognized project environment values are rejected");
 
   const enableFile = path.join(workspace, "supabase", "dev", "enable_test_development.sql");
   const disableFile = path.join(workspace, "supabase", "dev", "disable_test_development.sql");
-  // Opt-in scripts contain their own BEGIN/COMMIT; only this isolated DB runs them.
-  await client.query(await readFile(enableFile, "utf8"));
+  const markDevelopmentFile = path.join(workspace, "supabase", "dev", "mark_development_environment.sql");
+  const enableSql = await readFile(enableFile, "utf8");
+  const disableSql = await readFile(disableFile, "utf8");
+  const markDevelopmentSql = await readFile(markDevelopmentFile, "utf8");
+
+  await assertDevelopmentEnableFails(enableSql, "42501", "unknown project enable");
+  await assertDevelopmentRPCIsAbsent("unknown");
+  console.log("PASS: an unknown/default project cannot enable or create development RPCs");
+
+  // Simulate a missing project marker row. A failed enable must leave both the
+  // setting and test RPCs absent; restore the disposable fixture afterward.
+  await client.query("DELETE FROM private.project_settings WHERE singleton");
+  await assertDevelopmentEnableFails(enableSql, "42501", "missing project marker enable");
+  await assertDevelopmentEnableFails(markDevelopmentSql, "42501", "missing project marker classification");
+  const missingMarkerQuery =
+    "SELECT to_regprocedure('public.create_development_roll(text,integer,integer,text)') IS NULL AS public_absent, " +
+    "to_regprocedure('private.create_development_roll(text,integer,integer,text)') IS NULL AS private_absent, " +
+    "count(*) = 0 AS marker_absent FROM private.project_settings";
+  const { rows: missingMarker } = await client.query(missingMarkerQuery);
+  assert.equal(missingMarker[0].public_absent, true);
+  assert.equal(missingMarker[0].private_absent, true);
+  assert.equal(missingMarker[0].marker_absent, true);
+  await client.query(
+    "INSERT INTO private.project_settings (singleton, is_development, project_environment) VALUES (true, false, 'unknown')",
+  );
+  await assertDevelopmentRPCIsAbsent("unknown");
+  console.log("PASS: a missing project marker fails before state changes or test RPC creation");
+
+  // This admin-only marker is a deliberate, separate opt-in from enabling the
+  // shortened-duration RPCs.
+  await client.query(markDevelopmentSql);
+  const { rows: markedDevelopment } = await client.query(
+    "SELECT project_environment, is_development FROM private.project_settings WHERE singleton",
+  );
+  assert.equal(markedDevelopment[0].project_environment, "development");
+  assert.equal(markedDevelopment[0].is_development, false);
+  await client.query(enableSql);
+
   await client.query("BEGIN");
   try {
     await insertDevelopmentFixture(userId);
@@ -241,14 +309,53 @@ async function runDevelopmentGuards() {
       [],
       "42501",
     );
-    console.log("PASS: an existing development RPC rejects calls when the project flag is disabled");
+    const { rows: disabledRoll } = await client.query(
+      "SELECT * FROM public.create_roll('Disabled development override fixture')",
+    );
+    await client.query("RESET ROLE");
+    await expectSQLState(
+      "UPDATE public.rolls SET development_speed = 'test_30s', development_seconds = 30 WHERE id = $1",
+      [disabledRoll[0].id],
+      "42501",
+    );
+    console.log("PASS: disabling the flag blocks both the RPC and direct shortened roll settings");
   } finally {
     // Rolls, memberships, and the auth/profile fixture all belong to this transaction.
     await client.query("ROLLBACK");
-    await client.query(await readFile(disableFile, "utf8"));
   }
-  await assertDevelopmentRPCIsAbsent();
-  console.log("PASS: the disable script removes development RPCs and restores the production guard");
+
+  // The enable script is expected to have installed the RPCs; the disable
+  // script must remove them, clear the override, and tolerate a repeated run.
+  await client.query(disableSql);
+  await assertDevelopmentRPCIsAbsent("development");
+  await client.query(disableSql);
+  await assertDevelopmentRPCIsAbsent("development");
+  console.log("PASS: disabling is idempotent and restores the fail-closed roll guard");
+
+  await client.query(
+    "UPDATE private.project_settings SET project_environment = 'production' WHERE singleton",
+  );
+  await assertDevelopmentEnableFails(enableSql, "42501", "production project enable");
+  await assertDevelopmentRPCIsAbsent("production");
+  await assertDevelopmentEnableFails(markDevelopmentSql, "42501", "production reclassification");
+  await assertDevelopmentRPCIsAbsent("production");
+  await client.query("BEGIN");
+  try {
+    await expectSQLState(
+      "UPDATE private.project_settings SET is_development = true WHERE singleton",
+      [],
+      "42501",
+    );
+    await expectSQLState(
+      "UPDATE private.project_settings SET project_environment = 'development' WHERE singleton",
+      [],
+      "42501",
+    );
+  } finally {
+    await client.query("ROLLBACK");
+  }
+  await assertDevelopmentRPCIsAbsent("production");
+  console.log("PASS: production projects fail closed and cannot be reclassified as development");
 }
 
 async function removeOwnDirectory() {

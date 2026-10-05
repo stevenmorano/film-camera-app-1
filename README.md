@@ -144,8 +144,9 @@ For later testing on an iPhone, use a hosted development project's HTTPS URL. 12
 | 20261004231435_film_schema.sql | Core tables and foreign keys; unique request/exposure/path constraints; bounded counters; exact development deadlines; profile signup trigger; RLS enabled; protected project setting; capacity and development-speed guards. |
 | 20261004231438_film_access_and_rpcs.sql | Explicit client grants and member/profile/photo policies; invoker RPC wrappers around narrowly granted internal functions; atomic creation/claiming; owner-only finishing; server-clock development release; service-only upload confirmation. |
 | 20261004231440_film_storage.sql | Private JPEG-only film-originals bucket with 10 MiB maximum objects; reserved-path INSERT; developed-member SELECT; restrictive guards against anonymous access, replacement, deletion, and policy widening. |
+| 20261005000000_project_environment_guard.sql | Adds a private project-environment marker that defaults to unknown, prevents production from being reclassified as development, and requires both the development marker and admin opt-in for shortened roll durations. |
 
-The migrations were created with the installed Supabase CLI. Optional supabase/dev/*.sql files are deliberately outside the migration directory and are not included in db push or db reset.
+The migrations were created with the installed Supabase CLI. Optional supabase/dev/*.sql files are deliberately outside the migration directory and are not included in db push or db reset. Use mark_development_environment.sql as an administrator only after verifying the target is the intended dedicated development project.
 
 ## Database API contract
 
@@ -177,14 +178,18 @@ After development, an authorized member can download or create a signed download
 
 ## Development-only shortened development times
 
-On the dedicated DEVELOPMENT project only, apply supabase/dev/enable_test_development.sql as the database administrator. It enables an administrator-only project flag and installs create_development_roll with an allowlist of 30, 300, 3600, and 604800 seconds. No client flag or arbitrary duration enables it. Ordinary create_roll remains seven days.
+The project_environment field in private.project_settings defaults to unknown. Unknown, missing, and production markers fail closed. Only a database administrator can classify an unknown project as development with supabase/dev/mark_development_environment.sql; the script refuses a production marker. Production markers cannot be changed back to development through ordinary updates.
 
-The enable/disable scripts are not yet fail-closed against an incorrectly linked hosted project. Before running either with --linked, independently verify the project ref and confirm it is the dedicated development project. Do not run these scripts against production. The production migrations leave shortened development disabled.
+After independently verifying the project ref, mark only the dedicated DEVELOPMENT project, then apply supabase/dev/enable_test_development.sql as the database administrator. The enable script checks the marker before changing the override or creating test RPCs. The database also requires both project_environment = development and the separate is_development opt-in before accepting shortened durations. The only allowed values are 30, 300, 3600, and 604800 seconds. No client parameter or environment flag can enable them, and ordinary create_roll remains seven days.
+
+To disable the override, apply supabase/dev/disable_test_development.sql as an administrator. It removes both test RPCs and resets is_development to false; the project remains marked development, but short durations stay disabled until the enable script is deliberately applied again. Do not run the marker or enable scripts against production.
 
 ```powershell
-# LOCAL disposable stack:
+# LOCAL disposable stack: mark this local database, then enable its test RPC.
+npx.cmd --no-install supabase db query --local --file supabase/dev/mark_development_environment.sql
 npx.cmd --no-install supabase db query --local --file supabase/dev/enable_test_development.sql
-# Or your LINKED dedicated development project (after independently verifying the project ref):
+# For a dedicated LINKED development project, verify the project ref, then mark and enable:
+npx.cmd --no-install supabase db query --linked --file supabase/dev/mark_development_environment.sql
 npx.cmd --no-install supabase db query --linked --file supabase/dev/enable_test_development.sql
 # Disable on that same project when finished:
 npx.cmd --no-install supabase db query --linked --file supabase/dev/disable_test_development.sql
