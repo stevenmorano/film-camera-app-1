@@ -38,13 +38,13 @@ The project is in early development. At present:
 - Private Storage policies exist for original film photos.
 - Shared exposure allocation is atomic and backend-authoritative.
 - Backend database and concurrency tests exist.
-- The React Native / Expo mobile app has not yet been built.
+- The React Native / Expo / TypeScript mobile shell is scaffolded with Expo Router and public Supabase configuration validation. Authentication, roll flows, capture, and album screens are not implemented yet.
 
-The current repository work is the backend foundation. The technical sections below document what is implemented, how to run its checks, and the security boundaries the future app must preserve.
+The repository contains the backend foundation and a minimal mobile shell. The technical sections below document what is implemented, how to run its checks, and the security boundaries future app features must preserve.
 
 ## Architecture
 
-The planned client uses React Native, Expo, TypeScript, and Expo Router. Supabase provides Auth, Postgres, and private Storage. The mobile app is not implemented yet.
+The mobile shell uses React Native, Expo, TypeScript, and Expo Router. Supabase provides Auth, Postgres, and private Storage. The app shell is in place; Auth, roll, capture, and album behavior will be added in later issues.
 
 Supabase is authoritative for roll membership, exposure allocation, roll lifecycle, development timing, and photo access. Sensitive state changes happen in database functions and transactions. The mobile client must not set shared exposure totals or use its local clock to decide when a roll is developed.
 
@@ -60,6 +60,14 @@ Use Node.js 22 or newer. Run these commands in PowerShell:
 Set-Location 'D:\CodexWorkspaces\film-camera-app-1'
 npm.cmd ci
 ```
+
+Start the Expo development server from PowerShell:
+
+```powershell
+npm.cmd run start
+```
+
+For an iPhone smoke test, install Expo Go, put the phone and Windows computer on the same network, then scan the terminal QR code with the iPhone Camera app and open it in Expo Go. This workflow does not require Xcode or macOS.
 
 The repository pins Supabase CLI 2.119.0 and commits its lockfile. Use the local CLI with npx.cmd --no-install supabase; a global CLI installation is unnecessary.
 
@@ -124,14 +132,14 @@ Copy the example file for future Expo configuration:
 Copy-Item -LiteralPath '.env.example' -Destination '.env'
 ```
 
-Fill in the future Expo application's public configuration from the project's Connect dialog:
+Fill in the app's public configuration from the project's Connect dialog:
 
 ```dotenv
 EXPO_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT_REF.supabase.co
 EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY=YOUR_PUBLISHABLE_KEY
 ```
 
-A legacy anon key can be used as a compatibility alternative; prefer the current publishable key. The public key does not authorize private data by itself: the signed-in user's JWT and RLS do.
+The app config helper accepts only the current `sb_publishable_` key format and validates the URL before a Supabase client is initialized. The initial placeholder screen does not connect to Supabase, so the app shell can start before project values are configured. The publishable key does not authorize private data by itself: the signed-in user's JWT and RLS do.
 
 Never put a secret/service-role key, database password, or CLI access token in an EXPO_PUBLIC_* variable or mobile bundle. No privileged key is required in this repository's .env for the standalone tests. TEST_DATABASE_URL is an optional backend-test-only local PostgreSQL override; the default is postgresql://postgres:postgres@127.0.0.1:54322/postgres.
 
